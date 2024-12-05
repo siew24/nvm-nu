@@ -70,10 +70,51 @@ export def "nvm uninstall" [
 }
 
 # Undo effects of `nvm` on current shell
-export def "nvm deactivate" [
+export def --env "nvm deactivate" [
     --silent # Silences stdout/stderr output
 ] {
-    error make {msg: "Not implemented" }
+    let NEW_PATH = (nvm_strip_path $env.PATH "/bin")
+
+    if $"_($env.PATH)" == $"_($NEW_PATH)" {
+        if not $silent {
+            print -e $"Could not find ($env.NVM_DIR)/*/bin in $env.PATH"
+        }
+    } else {
+        $env.PATH = $NEW_PATH
+        if not $silent {
+            print $"($env.NVM_DIR)/*/bin removed from $env.PATH"
+        }
+    }
+
+    if ($env | get --ignore-errors "MANPATH" | is-not-empty) {
+    let NEW_PATH = (nvm_strip_path $env.PATH "/share/man")
+
+        if $"_($env.MANPATH)" == $"_($NEW_PATH)" {
+            if not $silent {
+                print -e $"Could not find ($env.NVM_DIR)/*/share/man in $env.MANPATH",
+            }
+        } else {
+            $env.MANPATH = $NEW_PATH
+            if not $silent {
+                print $"($env.NVM_DIR)/*/share/man removed from $env.MANPATH"
+            }
+        }
+    }
+
+    if ($env | get --ignore-errors "NODE_PATH" | is-not-empty) {
+    let NEW_PATH = (nvm_strip_path $env.PATH "/lib/node_modules")
+
+        if $"_($env.NODE_PATH)" == $"_($NEW_PATH)" {
+            if not $silent {
+                print -e $"Could not find ($env.NVM_DIR)/*/lib/node_modules in $env.NODE_PATH"
+            }
+        } else {
+            $env.NODE_PATH = $NEW_PATH
+            if not $silent {
+                print $"($env.NVM_DIR)/*/lib/node_modules removed from $env.NODE_PATH"
+            }
+        }
+    }
 }
 
 # Modify PATH to use <version>. Uses .nvmrc if available and version is omited.
@@ -101,10 +142,11 @@ export def "nvm exec" [] {
     error make { msg: "Not implemented" }
 }
 
+# List installed versions, matching a given <version> if provided
 export def "nvm list" [
     pattern: string = ""
-    --no-alias
-    --no-colors
+    --no-alias # Suppress `nvm alias` output
+    --no-colors # Suppress colored output
 ] {
     if ($pattern != "") and ($no_alias) {
         error make {
@@ -117,27 +159,51 @@ export def "nvm list" [
     }
 
     let NVM_LS_OUTPUT = (nvm_ls $pattern)
-    nvm_print_versions --no-colors=$no_colors
+    nvm_print_versions $NVM_LS_OUTPUT --no-colors=$no_colors
+
+    if (not $no_alias) and ($pattern == "") {
+        nvm alias --no-colors=$no_colors
+    }
 }
 
-export alias ls = list
+export alias "nvm ls" = nvm list
 
 export def "nvm list-remote" [] {
     error make { msg: "not implemented" }
 }
 
-export alias ls-remote = list-remote
+export alias "nvm ls-remote" = nvm list-remote
 
 # Display currently activated version of Node
 export def "nvm current" [] {
-    nvm_version current
+    print (nvm_version current)
 }
 
 export def "nvm which" [] {
     error make { msg: "Not implemented" }
 }
 
-export def "nvm alias" [] {
+export def "nvm alias" [
+    alias: string = ""
+    target: string = ""
+    --no-colors
+] {
+    let NVM_ALIAS_DIR = (nvm_alias_path)
+    let NVM_CURRENT = (nvm_ls_current)
+
+    mkdir $"($NVM_ALIAS_DIR)/lts"
+
+    mut ALIAS = "--"
+    mut TARGET = "--"
+
+    if ($alias | is-not-empty) {
+        $ALIAS = $alias
+    }
+
+    if ($target | is-not-empty) {
+        $TARGET = $target
+    }
+
     error make { msg: "Not implemented" }
 }
 
@@ -155,23 +221,30 @@ export def "nvm reinstall-packages" [] {
 
 export alias copy-packages = reinstall-packages
 
+# 
 export def "nvm clear-cache" [] {
     error make { msg: "Not implemented" }
 }
 
+# Resolve the given description to a single local version
 export def "nvm version" [] {
     error make { msg: "Not implemented" }
 }
 
+# Resolve the given description to a single remote version
 export def "nvm version-remote" [] {
     error make { msg: "Not implemented" }
 }
 
+# Unload `nvm` from shell
 export def "nvm unload" [] {
     error make { msg: "Not implemented" }
 }
 
-export def "nvm set-colors" [] {
+# Set five text colors using format "yMeBg". Available when supported.
+export def "nvm set-colors" [
+    color_codes: string
+] {
     error make { msg: "Not implemented" }
 }
 
@@ -188,11 +261,11 @@ def --env --wrapped nvm_cd [...rest: string]: string -> bool {
 }
 
 def --wrapped nvm_grep [...rest: string] {
-    GREP_OPTIONS='' command grep $rest
+    GREP_OPTIONS='' ^grep ...$rest
 }
 
 def nvm_has [any: string] {
-    ^type $any out> /dev/null err> /dev/fd/1
+    which $any | is-not-empty
 }
 
 def nvm_has_non_aliased [any: string = ""] {
@@ -287,11 +360,11 @@ def nvm_download [...rest: string] {
 }
 
 def nvm_has_system_node [] {
-    return ($"((deactivate out> /dev/null) and (command -v node))" != "")
+    return (try {nvm deactivate err+out> /dev/null} | (which node) | is-not-empty)
 }
 
 def nvm_has_system_iojs [] {
-    return ($"((deactivate out> /dev/null) and (command -v iojs))" != "")
+    return (try {nvm deactivate err+out> /dev/null} | (which iojs) | is-not-empty)
 }
 
 def nvm_is_version_installed [
@@ -697,8 +770,7 @@ def nvm_version [
     mut version = ""
 
     if $pattern == "current" {
-        print (nvm_ls_current)
-        return
+        return (nvm_ls_current)
     }
 
     let NVM_NODE_PREFIX = nvm_node_prefix
@@ -711,11 +783,10 @@ def nvm_version [
     $version = (nvm_ls $pattern | command tail -1)
 
     if ($version == "") or ($"_($version)" == "_N/A") {
-        nvm_echo "N/A"
-        return 3
+        return "N/A"
     }
 
-    nvm_echo $version
+    return $version
 }
 
 def --env nvm_ls_current [] {
@@ -745,7 +816,7 @@ def nvm_resolve_alias [
     pattern: string = ""
 ] {
     if $pattern == "" {
-        return 1
+        return [1]
     }
 
     mut ALIAS = $pattern
@@ -775,41 +846,38 @@ def nvm_resolve_alias [
         let NVM_NODE_PREFIX = (nvm_node_prefix)
 
         if ($ALIAS == "∞") or ($ALIAS == $NVM_IOJS_PREFIX) or ($ALIAS == $NVM_NODE_PREFIX) or ($ALIAS == $"($NVM_IOJS_PREFIX)-") {
-            nvm_echo $ALIAS
+            return [0, $ALIAS]
         } else {
-            nvm_ensure_version_prefix $ALIAS
+            return [0, (nvm_ensure_version_prefix $ALIAS)]
         }
-
-        return 0
     }
 
     if (nvm_validate_implicit_alias $pattern err> /dev/null) {
         let IMPLICIT = (nvm_print_implicit_alias local $pattern err> /dev/null)
 
         if ($IMPLICIT != "") {
-            nvm_ensure_version_prefix $IMPLICIT
+            return [2, (nvm_ensure_version_prefix $IMPLICIT)]
         }
     }
 
-    return 2
+    return [2]
 }
 
 def --env nvm_resolve_local_alias [any: string = ""] {
     if $any == "" {
-        return 1
+        return [1]
     }
 
     let VERSION = (nvm_resolve_alias $any)
-    let EXIT_CODE = $env.LAST_EXIT_CODE
 
-    if $VERSION == "" {
-        return $EXIT_CODE
+    if (($VERSION | length) == 1) or ($VERSION.1 == "") {
+        return [$VERSION.0]
     }
 
-    if $"_($VERSION)" == "_∞" {
-        nvm_version $VERSION
+    if $"_($VERSION.1)" != "_∞" {
+        return [0, (nvm_version $VERSION)]
     } else {
-        nvm_echo $VERSION
+        return [0, $VERSION]
     }
 }
 
@@ -826,25 +894,99 @@ def nvm_add_iojs_prefix [any: string = ""] {
 }
 
 def nvm_ensure_version_prefix [any: string] {
-    let nvm_version = nvm_strip_iojs_prefix $any | command sed -e 's/^\([0-9]\)/v\1/g'
+    mut nvm_version = nvm_strip_iojs_prefix $any | str replace -r '^([0-9])' 'v$1'
 
     if (nvm_is_iojs_version $any) {
         return (nvm_add_iojs_prefix $nvm_version)
     } else {
         return $nvm_version
     }
+
 }
 
-def nvm_strip_iojs_prefix [any: string]: string -> string {
-    let NVM_IOJS_PREFIX = nvm_iojs_prefix
+def nvm_num_version_groups [
+    version: string
+] {
+    let VERSION = ($version | str trim --left -c "v" | str trim --right -c ".")
+
+    if ($VERSION | is-empty) {
+        return "0"
+    }
+
+    return ""
+}
+
+def --env nvm_strip_path [
+    path: list<string>
+    folder:  string
+] {
+    if ($env | get --ignore-errors "NVM_DIR" | is-empty) {
+        error make {
+            msg: "[INTERNAL] nvm failed",
+            label: {
+                text: "NVM_DIR not found in PATH!",
+            }
+        }
+    }
+
+    return ($path | where not ($it =~ $"\(^($env.NVM_DIR)/versions/[^/]*\)/[^/]*\(/bin\)"))
+}   
+
+def nvm_set_colors [] {
+    error make { msg: "Not implemented" }
+}
+
+def --env nvm_get_colors [
+    code: int
+] {
+    let COLORS = $env | get --ignore-errors NVM_COLORS | default "bygre"
+
+    let COLOR = match $code {
+        1 => (nvm_print_color_code ($COLORS | str substring 0..0)),
+        2 => (nvm_print_color_code ($COLORS | str substring 1..1)),
+        3 => (nvm_print_color_code ($COLORS | str substring 2..2)),
+        4 => (nvm_print_color_code ($COLORS | str substring 3..3)),
+        5 => (nvm_print_color_code ($COLORS | str substring 4..4)),
+        6 => (nvm_print_color_code ($COLORS | str substring 2..2) | str replace -a "0;" "1;")
+    }
+
+    return $COLOR
+}
+
+def nvm_print_color_code [
+    code: string
+] {
+    return (match $code {
+        '0' => 0,
+        'r' => "0;31m",
+        'R' => "1;31m",
+        'g' => "0;32m",
+        'G' => "1;32m",
+        'b' => "0;34m",
+        'B' => "1;34m",
+        'c' => "0;36m",
+        'C' => "1;36m",
+        'm' => "0;35m",
+        'M' => "1;35m",
+        'y' => "0;33m",
+        'Y' => "1;33m",
+        'k' => "0;30m",
+        'K' => "1;30m",
+        'e' => "0;37m",
+        'W' => "1;37m"
+    })
+}
+
+def nvm_strip_iojs_prefix [any: string = ""]: string -> string {
+    let NVM_IOJS_PREFIX = (nvm_iojs_prefix)
 
     if $any == $NVM_IOJS_PREFIX {
         return ""
     } else {
         if ($any | str starts-with $NVM_IOJS_PREFIX) {
-            return $any | str substring ($NVM_IOJS_PREFIX | str length)..-1
+            return ($any | str substring ($NVM_IOJS_PREFIX | str length)..-1)
         } else {
-            return $any
+            return ($any)
         }
     }
 }
@@ -852,13 +994,14 @@ def nvm_strip_iojs_prefix [any: string]: string -> string {
 def nvm_ls [
     $pattern: string = ""
 ] {
+
+
     if $pattern == "current" {
-        print (nvm_ls_current)
-        return
+        return [(nvm_ls_current)]
     }
 
-    let NVM_IOJS_PREFIX = nvm_iojs_prefix
-    let NVM_NODE_PREFIX = nvm_node_prefix
+    let NVM_IOJS_PREFIX = (nvm_iojs_prefix)
+    let NVM_NODE_PREFIX = (nvm_node_prefix)
     let NVM_VERSION_DIR_IOJS = (nvm_version_dir $NVM_IOJS_PREFIX)
     let NVM_VERSION_DIR_NEW = (nvm_version_dir new)
     let NVM_VERSION_DIR_OLD = (nvm_version_dir old)
@@ -867,27 +1010,28 @@ def nvm_ls [
     if (($PATTERN == $NVM_IOJS_PREFIX) or ($PATTERN == $NVM_NODE_PREFIX)) {
         $PATTERN = $"($pattern)-"
     } else {
-        if ((nvm_resolve_local_alias $pattern) != 0) {
-            return
+        let temp = (nvm_resolve_local_alias $pattern)
+        if ($temp.0 == 0) {
+            return [$temp.1]
         }
 
         $PATTERN = (nvm_ensure_version_prefix $pattern)
     }
 
     if $PATTERN == "N/A" {
-        return
+        return []
     }
 
     let NVM_PATTERN_STARTS_WITH_V = $PATTERN | str starts-with "v"
 
-    mut VERSIONS = ""
+    mut VERSIONS = [""]
     mut NVM_ADD_SYSTEM = false
 
     if ($NVM_PATTERN_STARTS_WITH_V) and ( $"_(nvm_num_version_groups $PATTERN)" == "_3" ) {
         if (nvm_is_version_installed $PATTERN) {
-            $VERSIONS = $PATTERN
+            $VERSIONS = [$PATTERN]
         } else if (nvm_is_version_installed (nvm_add_iojs_prefix $PATTERN)) {
-            $VERSIONS = (nvm_add_iojs_prefix $PATTERN)
+            $VERSIONS = [(nvm_add_iojs_prefix $PATTERN)]
         }
     } else {
         if not (($PATTERN == $"($NVM_IOJS_PREFIX)-") or ($PATTERN == $"($NVM_NODE_PREFIX)-") or ($PATTERN == "system")) {
@@ -925,19 +1069,19 @@ def nvm_ls [
             }
         }
 
-        if ($NVM_DIRS_TO_SEARCH1 | path type | $in != "dir") or not (command ls -1qA $NVM_DIRS_TO_SEARCH1 | nvm_grep -q .) {
+        if ($NVM_DIRS_TO_SEARCH1 | path type | $in != "dir") or not (ls $NVM_DIRS_TO_SEARCH1 | where name =~ . | is-not-empty) {
             $NVM_DIRS_TO_SEARCH1 = ""
         }
-        if ($NVM_DIRS_TO_SEARCH2 | path type | $in != "dir") or not (command ls -1qA $NVM_DIRS_TO_SEARCH2 | nvm_grep -q .) {
+        if ($NVM_DIRS_TO_SEARCH2 | path type | $in != "dir") or not (ls $NVM_DIRS_TO_SEARCH2 | where name =~ . | is-not-empty) {
             $NVM_DIRS_TO_SEARCH2 = $NVM_DIRS_TO_SEARCH1
         }
-        if ($NVM_DIRS_TO_SEARCH3 | path type | $in != "dir") or not (command ls -1qA $NVM_DIRS_TO_SEARCH3 | nvm_grep -q .) {
+        if ($NVM_DIRS_TO_SEARCH3 | path type | $in != "dir") or not (ls $NVM_DIRS_TO_SEARCH3 | where name =~ . | is-not-empty) {
             $NVM_DIRS_TO_SEARCH3 = $NVM_DIRS_TO_SEARCH2
         }
 
         let SEARCH_PATTERN = match $PATTERN {
             "" => '.*'
-            _ => (nvm_echo $PATTERN | command sed 's#\.#\\\.#g;')
+            _ => ($PATTERN | str replace -a -r "\\." "\\\\\\.")
         }
 
         if $PATTERN == "" {
@@ -945,45 +1089,104 @@ def nvm_ls [
         }
 
         if ($"($NVM_DIRS_TO_SEARCH1)($NVM_DIRS_TO_SEARCH2)($NVM_DIRS_TO_SEARCH3)" != "") {
-            $VERSIONS = ((command find $"($NVM_DIRS_TO_SEARCH1)/*" $"($NVM_DIRS_TO_SEARCH2)/*" $"($NVM_DIRS_TO_SEARCH3)/*" -name . -o -type d -prune -o -path $"($PATTERN)*") | command sed -e "
-                s#${NVM_VERSION_DIR_IOJS}/#versions/${NVM_IOJS_PREFIX}/#;
-                s#^${NVM_DIR}/##;
-                \\#^[^v]# d;
-                \\#^versions\$# d;
-                s#^versions/##;
-                s#^v#${NVM_NODE_PREFIX}/v#;
-                \\#${SEARCH_PATTERN}# !d;
-            " -e 's#^\([^/]\{1,\}\)/\(.*\)$#\2.\1#;' |  command sort -t. -u -k 1.2,1n -k 2,2n -k 3,3n | command sed -e 's#\(.*\)\.\([^\.]\{1,\}\)$#\2-\1#;' -e "s#^${NVM_NODE_PREFIX}-##;")
+            $VERSIONS = (try {
+                ls -f $"($NVM_DIRS_TO_SEARCH1)/*" $"($NVM_DIRS_TO_SEARCH2)/*" $"($NVM_DIRS_TO_SEARCH3)/*" | where name =~ . or type == "dir" or name =~ $"($PATTERN)*" | get name
+            } catch {
+                [""]
+            }) | each { |item| $item
+               | str replace -r $"($NVM_VERSION_DIR_IOJS)/" $"versions/($NVM_IOJS_PREFIX)/"
+               | str replace -r $"^($env.NVM_DIR)" ""
+               | str replace -r "^versions/" ""
+               | str replace -r "^v" $"($NVM_NODE_PREFIX)/v"
+               | str replace -r "^([^/]{1,})/(.*)$" "$2.$1"
+               | str replace -r "(.*).([^.]{1,})$" "$2-$1"
+               | str replace -r $"^($NVM_NODE_PREFIX)-" ""
+            }
         }
     }
 
     if $NVM_ADD_SYSTEM {
         if ($PATTERN == "") or ($PATTERN == "v") {
-            $VERSIONS = $"($VERSIONS)
-system"
+            $VERSIONS = [$"($VERSIONS)
+system"]
         } else if ($PATTERN == "system") {
-            $VERSIONS = "system"
+            $VERSIONS = ["system"]
         }
     }
 
     if $VERSIONS == "" {
-        nvm_echo "N/A"
-        return 3
+        return ["N/A"]
     }
 
-    nvm_echo $VERSIONS
+    return $VERSIONS
 }
 
 def nvm_print_versions [
+    $versions: list<string>
     --no-colors
 ] {
-    print $no_colors
+    let NVM_CURRENT = (nvm_ls_current)
+    mut NVM_HAS_COLORS = false 
+
+    let INSTALLED_COLOR = (nvm_get_colors 1)
+    let SYSTEM_COLOR = (nvm_get_colors 2)
+    let CURRENT_COLOR = (nvm_get_colors 3)
+    let NOT_INSTALLED_COLOR = (nvm_get_colors 4)
+    let DEFAULT_COLOR = (nvm_get_colors 5)
+    let LTS_COLOR = (nvm_get_colors 6)
+
+    if (not $no_colors) and (nvm_has_colors) {
+        $NVM_HAS_COLORS = true
+    }
+
+    mut fmt_installed = "%15s *"
+    mut fmt_system = "%15s *"
+    mut fmt_current = "->%13s *"
+
+    if $NVM_HAS_COLORS {
+        $fmt_installed = match ($INSTALLED_COLOR | describe | str replace --regex "<.*" "") {
+            "int" => $"\\033[($INSTALLED_COLOR)%15s\\033[0m",
+            _ => "%15s"
+        } 
+
+        $fmt_system = match ($SYSTEM_COLOR | describe | str replace --regex "<.*" "") {
+            "int" => $"\\033[($SYSTEM_COLOR)%15s\\033[0m",
+            _ => "%15s"
+        } 
+
+        $fmt_current = match ($CURRENT_COLOR | describe | str replace --regex "<.*" "") {
+            "int" => $"\\033[($CURRENT_COLOR)->%13s\\033[0m",
+            _ => "%13s"
+        }
+    }
+
+    let latest_lts_color = $CURRENT_COLOR | str replace -r "0;" "1;"
+    
+    mut fmt_latest_lts = " (Latest LTS: %s)"
+    mut fmt_old_lts = " (LTS: %s)"
+
+    if $NVM_HAS_COLORS {
+        if ($latest_lts_color | is-not-empty) {
+            $fmt_latest_lts = $"\\033[($latest_lts_color) \(Latest LTS: %s\)\\033[0m"
+        }
+
+        if ($DEFAULT_COLOR | is-not-empty) {
+            $fmt_latest_lts = $"\\033[($DEFAULT_COLOR) \(LTS: %s\)\\033[0m"
+        }
+    }
+
+    let rows = $versions | length
+    let installed_versions = (nvm_ls)
+
+    for index in 0..($rows - 1) {
+        print ($versions | get $index)
+    }
 }
 
 def nvm_is_iojs_version [any: string] {
     if ($any | str starts-with "iojs-") {
-        return false
+        return true 
     }
 
-    return true
+    return false
 }
