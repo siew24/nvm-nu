@@ -174,8 +174,30 @@ export def "nvm list" [
 
 export alias "nvm ls" = nvm list
 
-export def "nvm list-remote" [] {
-    error make { msg: "not implemented" }
+# List remote versions available for install, matching a given <version> if provided
+export def "nvm list-remote" [
+    pattern: string = "" # The version number
+    --lts: string # When listing, only select from LTS (long-term support) versions
+    --no-colors # Suppress colored output
+] {
+    mut PATTERN = $pattern
+    mut LTS = $lts
+
+    if ($LTS | is-empty) {
+        if ($PATTERN | str starts-with "lts/") {
+            $LTS = $PATTERN | str substring 4..
+            $PATTERN = ""
+        }
+    }
+
+    let OUTPUT = (nvm_remote_versions $PATTERN --lts=$LTS)
+
+    if ($OUTPUT | is-empty) {
+        nvm_print_versions ["N/A"] --no-colors=$no_colors
+        return
+    }
+
+    nvm_print_versions ($OUTPUT | each {|it| $"($it.version) ($it.alias)(if ($it.new) {' *'} else {''})"}) --no-colors=$no_colors
 }
 
 export alias "nvm ls-remote" = nvm list-remote
@@ -353,7 +375,7 @@ def nvm_get_latest [] {
     mut CURL_COMPRESSED_FLAG = ""
 
     if (nvm_has "curl") {
-        if nvm_curl_use_compression {
+        if (nvm_curl_use_compression) {
             $CURL_COMPRESSED_FLAG = "--compressed"
         }
 
@@ -378,7 +400,7 @@ def --wrapped nvm_download [...rest: string] {
     mut CURL_COMPRESSED_FLAG = ""
 
     if (nvm_has "curl") {
-        if nvm_curl_use_compression {
+        if (nvm_curl_use_compression) {
             $CURL_COMPRESSED_FLAG = "--compressed"
         }
 
@@ -824,8 +846,64 @@ def nvm_remote_version [] {
     error make { msg: "Not Implemented" }
 }
 
-def nvm_remote_versions [] {
-    error make { msg: "Not Implemented" }
+def nvm_remote_versions [
+    pattern: string = ""
+    --lts: string = ""
+]: string -> table {
+    let NVM_IOJS_PREFIX = (nvm_iojs_prefix)
+    let NVM_NODE_PREFIX = (nvm_node_prefix)
+    mut PATTERN = $pattern
+
+    mut FLAVOR = ""
+
+    if ($lts | is-not-empty) {
+        $FLAVOR = $NVM_NODE_PREFIX
+    }
+
+    if ($PATTERN in [$NVM_IOJS_PREFIX "io.js"]) {
+        $FLAVOR = $NVM_IOJS_PREFIX
+        $PATTERN = ""
+    } else if ($PATTERN == $NVM_NODE_PREFIX) {
+        $FLAVOR = $NVM_NODE_PREFIX
+        $PATTERN = ""
+    }
+
+    if (nvm_validate_implicit_alias $PATTERN) {
+        error make {
+            label: {
+                text: "Implicit aliases are not supported in nvm_remote_versions.",
+                span: (metadata $PATTERN).span
+            }
+        }
+    }
+
+    mut NVM_LS_REMOTE_PRE_MERGED_OUTPUT = []
+    mut NVM_LS_REMOTE_POST_MERGED_OUTPUT = []
+
+    if ($FLAVOR | is-empty) or ($FLAVOR == $NVM_NODE_PREFIX) {
+        let NVM_LS_REMOTE_OUTPUT = (nvm_ls_remote $PATTERN --lts=$lts)
+
+        $NVM_LS_REMOTE_PRE_MERGED_OUTPUT = $NVM_LS_REMOTE_OUTPUT | take while { |it| $it.version != "v4.0.0" }
+        $NVM_LS_REMOTE_POST_MERGED_OUTPUT = $NVM_LS_REMOTE_OUTPUT | skip ($NVM_LS_REMOTE_PRE_MERGED_OUTPUT | length)
+    }
+
+    mut NVM_LS_REMOTE_IOJS_OUTPUT = []
+
+    if ($lts | is-empty) and (($FLAVOR | is-empty) or ($FLAVOR == $NVM_IOJS_PREFIX)) {
+        $NVM_LS_REMOTE_IOJS_OUTPUT = (nvm_ls_remote_iojs $PATTERN)
+    }
+
+    let VERSIONS = ([
+        ...$NVM_LS_REMOTE_PRE_MERGED_OUTPUT
+        ...$NVM_LS_REMOTE_IOJS_OUTPUT
+        ...$NVM_LS_REMOTE_POST_MERGED_OUTPUT
+    ] | where { |it| $it.version != "N/A" })
+
+    if ($VERSIONS | is-empty) {
+        return [[version]; ["N/A"]]
+    }
+
+    return $VERSIONS
 }
 
 def nvm_is_valid_version [] {
@@ -1019,9 +1097,9 @@ def nvm_print_formatted_alias [
     }
 
     if $destination == $VERSION {
-        printf ($alias_format + " " + $arrow + " " + $version_format + $newline) $alias $destination
+        print -n (($alias_format + " " + $arrow + " " + $version_format + $newline) | str replace "%s" $alias | str replace "%s" $destination)
     } else {
-        printf ($alias_format + " " + $arrow + " " + $dest_format + " (" + $arrow + " " + $version_format + ")" + $newline) $alias $destination $VERSION
+        print -n (($alias_format + " " + $arrow + " " + $dest_format + " (" + $arrow + " " + $version_format + ")" + $newline) | str replace "%s" $alias | str replace "%s" $destination | str replace "%s" $VERSION)
     }
 }
 
@@ -1075,7 +1153,15 @@ def nvm_make_alias [
     alias: string = ""
     version: string = ""
 ] {
-    error make { msg: "Not Implemented" }
+    if ($alias | is-empty) {
+        error make { msg: "An alias is required." }
+    }
+
+    if ($version | is-empty) {
+        error make { msg: "An alias target version is required." }
+    }
+
+    $version | save -f $"(nvm_alias_path)/($alias)"
 }
 
 def nvm_list_aliases [
@@ -1099,17 +1185,16 @@ def nvm_list_aliases [
 
     # For default aliases, we should try to print them even if the alias files don't exist
     [$"(nvm_node_prefix)" stable unstable $"(nvm_iojs_prefix)"] | each { |ALIAS_NAME|
-        # try {
-        #     nvm_print_default_alias $ALIAS_NAME --no-colors=$no_colors --current=$NVM_CURRENT
-        # } catch { |err|
-        #     # Skip aliases that don't exist yet
-        #     null
-        # }
-        print (nvm_print_default_alias $ALIAS_NAME --no-colors=$no_colors --current=$NVM_CURRENT)
+        try {
+            print (nvm_print_default_alias $ALIAS_NAME --no-colors=$no_colors --current=$NVM_CURRENT)
+        } catch { |err|
+            # Skip aliases that don't exist yet
+            null
+        }
     }
 
     try {
-        ls $"($NVM_ALIAS_DIR)/lts/($alias)*" | get name | each { |ALIAS_PATH|
+        glob $"($NVM_ALIAS_DIR)/lts/($alias)*" | each { |ALIAS_PATH|
             let LTS_ALIAS = (nvm_print_alias_path $NVM_ALIAS_DIR $ALIAS_PATH --no-colors=$no_colors --current=$NVM_CURRENT --nvm-lts)
 
             if ($LTS_ALIAS | is-not-empty) {
@@ -1146,7 +1231,7 @@ def nvm_alias [
         }
     }
 
-    return $NVM_ALIAS_PATH
+    return (open $NVM_ALIAS_PATH)
 }
 
 def --env nvm_ls_current [] {
@@ -1405,10 +1490,10 @@ system"]
     return $VERSIONS
 }
 
-def nvm_ls_remote [
+export def nvm_ls_remote [
     pattern: string = ""
     --lts: string = ""
-] -> list<string> {
+] -> table {
 
     mut PATTERN = $pattern
 
@@ -1416,9 +1501,9 @@ def nvm_ls_remote [
     if (nvm_validate_implicit_alias $PATTERN) {
         let IMPLICIT = (nvm_print_implicit_alias "remote" $PATTERN)
         if ($IMPLICIT | is-empty) or ($IMPLICIT == 'N/A') {
-            return ['N/A']
+            return [[version]; ['N/A']]
         }
-        $PATTERN = (NVM_LTS=$lts nvm_ls_remote $IMPLICIT | last)
+        $PATTERN = (NVM_LTS=$lts nvm_ls_remote $IMPLICIT | last | get version)
     } else if ($PATTERN | is-not-empty) {
         # If a pattern is provided, ensure it has version prefix
         $PATTERN = (nvm_ensure_version_prefix $PATTERN)
@@ -1431,11 +1516,11 @@ def nvm_ls_remote [
     let VERSIONS = (nvm_ls_remote_index_tab "node" "std" $PATTERN --lts=$lts)
     
     if ($VERSIONS | is-empty) {
-        return ['N/A']
+        return [[version]; ['N/A']]
     }
 
     # Return as list
-    $VERSIONS | lines | where {|it| $it != "" } | sort
+    $VERSIONS
 }
 
 def nvm_ls_remote_iojs [
@@ -1450,19 +1535,19 @@ def nvm_ls_remote_index_tab [
     type: string = ""
     pattern: string = ""
     --lts: string = ""
-] -> list<string> {
+] -> table {
     let MIRROR = (nvm_get_mirror $flavor $type)
 
     if ($MIRROR | is-empty) {
-        return ["N/A"]
+        return [[version]; ["N/A"]]
     }
 
     let PREFIX = match $"($flavor)-($type)" {
-        "iojs-std" => (nvm_iojs_prefix),
+        "iojs-std" => $"(nvm_iojs_prefix)-",
         "node-std" => "",
         _ => {
             nvm_err "Unknown type of node.js or io.js release"
-            return ["N/A"]
+            return [[version]; ["N/A"]]
         }
     }
 
@@ -1485,7 +1570,7 @@ def nvm_ls_remote_index_tab [
         | lines 
         | skip 1  # Skip header line
         | each { |line| 
-            $"($PREFIX)($line)"
+            $"($PREFIX)($line)" | split row "\t"
         }
     )
 
@@ -1493,96 +1578,89 @@ def nvm_ls_remote_index_tab [
 
     # Parse version list and create aliases
     $VERSION_LIST
-    | lines
-    | parse "{version} {codename}"
-    | where codename != "-" and codename != ""
-    | reduce -f {alias: "", seen: {}, results: []} { |line, acc|
-        let codename = ($line.codename | str downcase)
-        
-        # Skip if we've seen this codename before
-        if ($acc.seen | get -i $codename) == null {
-            let new_alias = $"lts/($codename)"
-            let new_results = (
-                if ($acc.results | is-empty) {
-                    # First LTS version becomes lts/*
-                    [
-                        {alias: "lts/*", version: $new_alias},
-                        {alias: $new_alias, version: $line.version}
-                    ]
-                } else {
-                    # Subsequent versions just get their own alias
-                    $acc.results | append {
-                        alias: $new_alias,
-                        version: $line.version
-                    }
-                }
-            )
-            
-            {
-                alias: $new_alias,
-                seen: ($acc.seen | upsert $codename true),
-                results: $new_results
+        | reduce -f {} { |row, acc|
+            if ($row.9? | is-empty) or ($row.9 == "-") {
+                return $acc
             }
-        } else {
-            $acc
+
+            mut ACC = $acc
+            let ALIAS_NAME = $"lts/($row.9? | str downcase)"
+
+            let version = ($ACC | get version?)
+
+            if ("alias" in $ACC) {
+                $ACC = ($ACC | upsert ($ACC | get alias) { $version })
+            } else {
+                $ACC = ($ACC | upsert "lts/*" { $ALIAS_NAME })
+            }
+
+            $ACC = ($ACC | upsert "alias" { $ALIAS_NAME })
+            $ACC = ($ACC | upsert "version" { $row.0 })
+            return $ACC
         }
-    }
-    | get results
-    | each { |entry|
-        # Call nvm_make_alias for each alias-version pair
-        nvm_make_alias $entry.alias $entry.version
-    }
+        | reject -i alias version
+        | transpose LTS_ALIAS LTS_VERSION
+        | each { |row|
+            nvm_make_alias $row.LTS_ALIAS $row.LTS_VERSION
+        }
 
     let LTS = if ($lts | is-not-empty) {
-        (nvm_normalize_lts $"lts/($lts)")
+        (nvm_normalize_lts $"lts/($lts)") | str replace -r "^lts/" ""
     } else {
-        $lts | str replace -r "^lts/" ""
+        ""
     }
 
-    let VERSIONS = $VERSION_LIST
-    | lines                              # Split into lines
-    | parse -r '(?P<version>v[\d\.]+)\s*(?P<lts_name>[^\s]*)?.*'  # Parse version and LTS name
-    | where version != ""                # Skip empty lines
-    | where {|row| 
-        if $lts == "" { 
-            true                         # Show all if no LTS filter
-        } else if $lts == "*" {
-            $row.lts_name != ""         # Show all LTS versions
-        } else {
-            $row.lts_name | str downcase | str contains ($lts | str downcase)
+    mut VERSIONS = $VERSION_LIST
+    | reduce -f {lts: $lts} {|row, acc|
+        let prev = ($acc | get prev? | default "")
+        let lts = ($acc | get lts)
+        if ($lts | is-not-empty) and ($row.9? == "-") {
+            return $acc
         }
-    }
-    | reduce -f [] {|row, acc|          # Format output with LTS markers
-        let prev_lts = ($acc | last | get lts_name? | default "")
-        if $row.lts_name != "" {
-            if $row.lts_name != $prev_lts {
-                $acc | append {
-                    version: $row.version
-                    lts_name: $row.lts_name
-                    is_latest: true
-                }
+
+        if ($lts | is-not-empty) and ($lts != "*") and (($row.9? | str downcase) != ($lts | str downcase)) {
+            return $acc
+        }
+
+        if ($row.9? != "-") {
+            if ($row.9? | is-not-empty) and ($row.9? != $prev) {
+                return ($acc | upsert $row.0 { alias: $row.9?, new: true } | upsert prev { $row.9? })
             } else {
-                $acc | append {
-                    version: $row.version
-                    lts_name: $row.lts_name
-                    is_latest: false
-                }
+                return ($acc | upsert $row.0 { alias: $row.9?, new: false } | upsert prev { $row.9? })
             }
-        } else {
-            $acc | append {
-                version: $row.version
-                lts_name: ""
-                is_latest: false
-            }
-        }
+        } 
+
+        return ($acc | upsert $row.0 { alias: "", new: false } | upsert prev { $row.9? })
     }
-    | sort-by version
+    | reject lts prev
+    | transpose version data
+    | flatten
+
+    if ($flavor == "node") {
+        $VERSIONS = ($VERSIONS | sort-by -c {|a, b| 
+            let a_versions = ($a.version | split row "." | each {|it| $it | str trim --left --char "v" | into int})
+            let b_versions = ($b.version | split row "." | each {|it| $it | str trim --left --char "v" | into int})
+
+            if ($a_versions | get 0) != ($b_versions | get 0) {
+                return (($a_versions | get 0) < ($b_versions | get 0))
+            }
+
+            if ($a_versions | get 1) != ($b_versions | get 1) {
+                return (($a_versions | get 1) < ($b_versions | get 1))
+            }
+
+                return (($a_versions | get 2) < ($b_versions | get 2))
+            }
+        )
+    } else {
+        $VERSIONS = ($VERSIONS | sort-by version)
+    }
 
     if ($VERSIONS | is-empty) {
-        return ["N/A"]
+        return [[version]; ["N/A"]]
     }
 
-    return ($VERSIONS | get version | sort)
+    return $VERSIONS
 }
 
 def nvm_get_checksum_binary [] {
@@ -1609,77 +1687,118 @@ def nvm_print_versions [
     $versions: list<string>
     --no-colors
 ] {
-    let NVM_CURRENT = (nvm_ls_current)
-    mut NVM_HAS_COLORS = false 
-
+    let REMOTE_VERSIONS = $versions
+    let INSTALLED_VERSIONS = (nvm_ls)
     let INSTALLED_COLOR = (nvm_get_colors 1)
     let SYSTEM_COLOR = (nvm_get_colors 2)
     let CURRENT_COLOR = (nvm_get_colors 3)
     let NOT_INSTALLED_COLOR = (nvm_get_colors 4)
     let DEFAULT_COLOR = (nvm_get_colors 5)
+    let OLD_LTS_COLOR = $DEFAULT_COLOR
     let LTS_COLOR = (nvm_get_colors 6)
+    mut HAS_COLORS = false
 
     if (not $no_colors) and (nvm_has_colors) {
-        $NVM_HAS_COLORS = true
+        $HAS_COLORS = true
     }
 
-    mut fmt_installed = "%15s *"
-    mut fmt_system = "%15s *"
-    mut fmt_current = "->%13s *"
+    for VERSION in $REMOTE_VERSIONS {
+        let fields = ($VERSION | split row " " | { "version": $in.0, "alias": $in.1?, "is_lts": ($in | get 2? | default "") } )
+        mut cols = 1
 
-    if $NVM_HAS_COLORS {
-        $fmt_installed = match ($INSTALLED_COLOR | describe | str replace --regex "<.*" "") {
-            "int" => $"\\033[($INSTALLED_COLOR)%15s\\033[0m",
-            _ => "%15s"
-        } 
-
-        $fmt_system = match ($SYSTEM_COLOR | describe | str replace --regex "<.*" "") {
-            "int" => $"\\033[($SYSTEM_COLOR)%15s\\033[0m",
-            _ => "%15s"
-        } 
-
-        $fmt_current = match ($CURRENT_COLOR | describe | str replace --regex "<.*" "") {
-            "int" => $"\\033[($CURRENT_COLOR)->%13s\\033[0m",
-            _ => "%13s"
+        if ($fields.alias? | is-not-empty) {
+            $cols += 1
         }
-    }
-
-    let latest_lts_color = $CURRENT_COLOR | str replace -r "0;" "1;"
-    
-    mut fmt_latest_lts = " (Latest LTS: %s)"
-    mut fmt_old_lts = " (LTS: %s)"
-
-    if $NVM_HAS_COLORS {
-        if ($latest_lts_color | is-not-empty) {
-            $fmt_latest_lts = $"\\033[($latest_lts_color) \(Latest LTS: %s\)\\033[0m"
+        if ($fields.is_lts? | is-not-empty) {
+            $cols += 1
         }
 
-        if ($DEFAULT_COLOR | is-not-empty) {
-            $fmt_latest_lts = $"\\033[($DEFAULT_COLOR) \(LTS: %s\)\\033[0m"
+        let is_installed = ($fields.version in $INSTALLED_VERSIONS)
+
+        let padding = if ((not $HAS_COLORS) and $is_installed) { "" } else { "  " }
+
+        mut version = if ($HAS_COLORS and ($CURRENT_COLOR | is-empty)) or (not $HAS_COLORS) {
+            $fields.version | fill -w 13 -a r
+        } else {
+            $fields.version | fill -w 15 -a r
         }
-    }
 
-    let rows = $versions | length
-    let installed_versions = (nvm_ls)
+        $version = if ($HAS_COLORS) {
+            if ($fields.version == "current") {
+                if ($CURRENT_COLOR | is-empty) {
+                    $version
+                } else {
+                    $version | str replace -r "^" $"(ansi -e $CURRENT_COLOR)->" | str replace -r "$" $"(ansi reset)"
+                }
+            } else if ($fields.version == "system") {
+                if ($SYSTEM_COLOR | is-empty) {
+                    $version
+                } else {
+                    $version | str replace -r "^" $"(ansi -e $SYSTEM_COLOR)" | str replace -r "$" $"(ansi reset)"
+                }
+            } else if ($is_installed) {
+                if ($INSTALLED_COLOR | is-empty) {
+                    $version
+                } else {
+                    $version | str replace -r "^" $"(ansi -e $INSTALLED_COLOR)" | str replace -r "$" $"(ansi reset)"
+                }
+            } else {
+                $version
+            }
+        } else {
+            if ($fields.version == "current") {
+                $version | str replace -r "^" "->" | str replace -r "$" " *"
+            } else if ($fields.version == "system" or $is_installed) {
+                $version | str replace -r "$" " *"
+            } else {
+                $version
+            }
+        }
 
-    for index in 0..($rows - 1) {
-        print ($versions | get $index)
+        mut lts = if ($cols == 1) {
+            ""
+        } else if ($cols == 2) {
+            if ($HAS_COLORS and ($OLD_LTS_COLOR | is-not-empty)) {
+                $fields.alias | str replace -r "^" $"(ansi -e $OLD_LTS_COLOR) \(LTS: " | str replace -r "$" $")(ansi reset)"
+            } else {
+                $fields.alias | str replace -r "^" " (LTS: " | str replace -r "$" ")"
+            }
+        } else if ($cols == 3 and $fields.is_lts == "*") {
+            if ($HAS_COLORS and ($CURRENT_COLOR | is-not-empty)) {
+                $fields.alias | str replace -r "^" $"(ansi -e $CURRENT_COLOR) \(Latest LTS: " | str replace -r "$" $")(ansi reset)"
+            } else {
+                $fields.alias | str replace -r "^" " (Latest LTS: " | str replace -r "$" ")"
+            }
+        }
+
+        if ($cols == 1) {
+            print $version 
+        } else if ($cols == 2) {
+            print ($version + $padding + $lts)
+        } else if ($cols == 3) and ($fields.is_lts == "*") {
+            print ($version + $padding + $lts)
+        }
     }
 }
 
 def nvm_validate_implicit_alias [
     alias: string = ""
+    --throw
 ] -> bool {
     let NVM_IOJS_PREFIX = (nvm_iojs_prefix)
     let NVM_NODE_PREFIX = (nvm_node_prefix)
 
     if ($alias not-in ["stable" "unstable" $"($NVM_IOJS_PREFIX)" $"($NVM_NODE_PREFIX)"])  {
-        error make {
-            label: {
+        if $throw {
+            error make {
+                msg: "Only implicit aliases 'stable', 'unstable', '($NVM_IOJS_PREFIX)' and '($NVM_NODE_PREFIX)' are supported."
+                label: {
                 text: $"Only implicit aliases 'stable', 'unstable', '($NVM_IOJS_PREFIX)' and '($NVM_NODE_PREFIX)' are supported."
-                span: (metadata $alias).span
+                    span: (metadata $alias).span
+                }
             }
         }
+        return false
     }
 
     return true
