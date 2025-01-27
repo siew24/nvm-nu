@@ -169,6 +169,7 @@ export def "nvm list" [
 
     if (not $no_alias) and ($pattern == "") {
         nvm alias --no-colors=$no_colors
+        return
     }
 }
 
@@ -249,7 +250,7 @@ export def "nvm alias" [
             }
         }
         nvm_make_alias $ALIAS $TARGET
-        nvm_print_formatted_alias $ALIAS $TARGET $VERSION --no-colors=$no_colors --current=$NVM_CURRENT
+        print -n (nvm_format_alias $ALIAS $TARGET $VERSION --no-colors=$no_colors --current=$NVM_CURRENT)
     } else {
         if $ALIAS == "--" {
             $ALIAS = ""
@@ -1032,7 +1033,7 @@ def nvm_print_color_code [
     })
 }
 
-def nvm_print_formatted_alias [
+def nvm_format_alias [
     alias: string = ""
     destination: string = ""
     version: string = ""
@@ -1040,7 +1041,7 @@ def nvm_print_formatted_alias [
     --default
     --current: string = ""
     --nvm-lts
-] {
+] -> string {
     let VERSION = if ($version | is-empty) {
         (nvm_version $destination)
     } else {
@@ -1097,9 +1098,9 @@ def nvm_print_formatted_alias [
     }
 
     if $destination == $VERSION {
-        print -n (($alias_format + " " + $arrow + " " + $version_format + $newline) | str replace "%s" $alias | str replace "%s" $destination)
+        return (($alias_format + " " + $arrow + " " + $version_format + $newline) | str replace "%s" $alias | str replace "%s" $destination)
     } else {
-        print -n (($alias_format + " " + $arrow + " " + $dest_format + " (" + $arrow + " " + $version_format + ")" + $newline) | str replace "%s" $alias | str replace "%s" $destination | str replace "%s" $VERSION)
+        return (($alias_format + " " + $arrow + " " + $dest_format + " (" + $arrow + " " + $version_format + ")" + $newline) | str replace "%s" $alias | str replace "%s" $destination | str replace "%s" $VERSION)
     }
 }
 
@@ -1127,11 +1128,13 @@ def nvm_print_alias_path [
     let DEST = (nvm_alias $ALIAS)
 
     if ($DEST | is-not-empty) {
-        nvm_print_formatted_alias $ALIAS $DEST --no-colors=$no_colors --default=false --nvm-lts=$nvm_lts --current=$current
+        return (nvm_format_alias $ALIAS $DEST --no-colors=$no_colors --default=false --nvm-lts=$nvm_lts --current=$current)
     }
+
+    return ""
 }
 
-export def nvm_print_default_alias [
+def nvm_print_default_alias [
     $alias: string = ""
     --no-colors
     --current: string = ""
@@ -1145,8 +1148,10 @@ export def nvm_print_default_alias [
 
     let DEST = (nvm_print_implicit_alias local $alias)
     if ($DEST | is-not-empty) {
-        nvm_print_formatted_alias $alias $DEST --no-colors=$no_colors --default --current=$current
+        return (nvm_format_alias $alias $DEST --no-colors=$no_colors --default --current=$current)
     }
+
+    return ""
 }
 
 def nvm_make_alias [
@@ -1177,34 +1182,38 @@ def nvm_list_aliases [
         return (nvm_alias $alias)
     }
 
-    try {
+    mut results = (try {
         ls $"($NVM_ALIAS_DIR)/($alias)*" | get name | each { |ALIAS_PATH|
             nvm_print_alias_path $NVM_ALIAS_DIR $ALIAS_PATH --no-colors=$no_colors --current=$NVM_CURRENT
         }
-    }
+    } catch { |err|
+        []
+    })
 
     # For default aliases, we should try to print them even if the alias files don't exist
-    [$"(nvm_node_prefix)" stable unstable $"(nvm_iojs_prefix)"] | each { |ALIAS_NAME|
+    $results = $results ++ [$"(nvm_node_prefix)" stable unstable $"(nvm_iojs_prefix)"] | each { |ALIAS_NAME|
         try {
-            print (nvm_print_default_alias $ALIAS_NAME --no-colors=$no_colors --current=$NVM_CURRENT)
+            return (nvm_print_default_alias $ALIAS_NAME --no-colors=$no_colors --current=$NVM_CURRENT)
         } catch { |err|
             # Skip aliases that don't exist yet
-            null
+            []
         }
     }
 
-    try {
+    $results = $results ++ (try {
         glob $"($NVM_ALIAS_DIR)/lts/($alias)*" | each { |ALIAS_PATH|
             let LTS_ALIAS = (nvm_print_alias_path $NVM_ALIAS_DIR $ALIAS_PATH --no-colors=$no_colors --current=$NVM_CURRENT --nvm-lts)
 
             if ($LTS_ALIAS | is-not-empty) {
-                print $LTS_ALIAS
+                return $LTS_ALIAS
             }
         }
     } catch { |err|
         # Skip if no LTS aliases exist yet
         null
-    }
+    })
+
+    $results | sort | each { |it| print -n $it }
 }
 
 def nvm_alias [
